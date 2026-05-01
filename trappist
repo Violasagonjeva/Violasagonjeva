@@ -1,0 +1,156 @@
+#include <iostream>
+#include <fstream>
+#include <valarray>
+#include <cmath>
+#include <list>
+#include <string>
+#include "Planet.hpp"
+#include "System.hpp"
+#include "cw2.hpp" // Header containing constants like G_SI, AU_IN_M, etc.
+
+using namespace std;
+
+// Global or static array to store masses for use in the RHS function
+valarray<double> masses(8);
+
+// RK4 integrator implementation
+valarray<double> rk4(double t, valarray<double> y, double h, valarray<double> (*f)(double, valarray<double>)) {
+    valarray<double> k1, k2, k3, k4;
+    
+    k1 = f(t, y);
+    k2 = f(t + h/2.0, y + h * k1 / 2.0);
+    k3 = f(t + h/2.0, y + h * k2 / 2.0);
+    k4 = f(t + h, y + h * k3);
+    
+    return y + h * (k1 + 2.0*k2 + 2.0*k3 + k4) / 6.0;
+}
+
+// General N-Body Right-Hand Side (Equations 9 & 10)
+valarray<double> rhs_NBody(double t, valarray<double> y) {
+    int N = 8; // 1 star + 7 planets
+    valarray<double> dydt(4 * N);
+
+    for (int i = 0; i < N; ++i) {
+        // Positions and velocities for body i
+        double xi = y[4 * i], yi = y[4 * i + 1];
+        dydt[4 * i]     = y[4 * i + 2]; // x' = vx
+        dydt[4 * i + 1] = y[4 * i + 3]; // y' = vy
+
+        double ax = 0, ay = 0;
+        for (int j = 0; j < N; ++j) {
+            if (i == j) continue; // Skip self-interaction
+            
+            double xj = y[4 * j], yj = y[4 * j + 1];
+            double dx = xj - xi;  // Vector from i to j
+            double dy = yj - yi;
+            double r2 = dx * dx + dy * dy;
+            double r3 = r2 * sqrt(r2);
+
+            // Gravitational acceleration from body j
+            ax += (G_SI * masses[j] / r3) * dx;
+            ay += (G_SI * masses[j] / r3) * dy;
+        }
+        dydt[4 * i + 2] = ax; // vx' = ax
+        dydt[4 * i + 3] = ay; // vy' = ay
+    }
+    return dydt;
+}
+
+int main() {
+    // 1. Initialise Data for TRAPPIST-1 System
+    double planet_r_AU[] = {0.01150, 0.01576, 0.02219, 0.02916, 0.03836, 0.0467, 0.0671};
+    double planet_m_Me[] = {1.02, 1.31, 0.39, 0.69, 1.04, 1.32, 0.33};
+    string p_names[] = {"1b", "1c", "1d", "1e", "1f", "1g", "1h"};
+
+    list<Planet> p_list;
+    valarray<double> y0(32); // Initial state vector (8 bodies * 4 variables)
+    
+    // Initialise y0 to zeros
+    for (int i = 0; i < 32; i++) y0[i] = 0.0;
+    
+    // Star (Body 0) at origin with zero velocity
+    masses[0] = M_1a; // Mass of TRAPPIST-1a in kg
+
+    for (int i = 0; i < 7; ++i) {
+        double r_m = planet_r_AU[i] * AU_IN_M; // Convert AU to meters
+        double m_kg = planet_m_Me[i] * M_EARTH; // Convert Earth masses to kg
+        double v_circ = sqrt(G_SI * M_1a / r_m); // Circular orbit velocity
+
+        // Create Planet object and add to list
+        valarray<double> X = {r_m, 0.0};
+        valarray<double> V = {0.0, v_circ};
+        p_list.push_back(Planet(p_names[i], m_kg, 0.0, X, V));
+
+        // Populate initial state vector and mass array for RHS
+        masses[i + 1] = m_kg;
+        y0[4 * (i + 1)] = r_m;        // x
+        y0[4 * (i + 1) + 1] = 0.0;    // y
+        y0[4 * (i + 1) + 2] = 0.0;    // vx
+        y0[4 * (i + 1) + 3] = v_circ; // vy
+    }
+
+    // Get star parameters for System constructor
+    valarray<double> star_pos = {0.0, 0.0};
+    valarray<double> star_vel = {0.0, 0.0};
+    
+    // Create the System object
+    System TRAPPIST_1("TRAPPIST-1", "1a", M_1a, R_1a, T_1a, L_1a, 
+                      star_pos, star_vel, p_list);
+
+    // 2. Evolution Loop
+    double t = 0, h = 1000.0, tf = 1.0e6;
+    ofstream outfile("trappist_orbits.dat");
+    
+    if (!outfile.is_open()) {
+        cerr << "ERROR: Cannot open output file." << endl;
+        return 1;
+    }
+    
+    // Write header
+    outfile << "# Time(s)";
+    for (int i = 0; i < 8; i++) {
+        outfile << " body" << i << "_x body" << i << "_y";
+    }
+    outfile << endl;
+
+    int step = 0;
+    cout << "Starting simulation for " << tf << " seconds..." << endl;
+    
+    while (t <= tf) {
+        // Output every 100 steps to keep file size reasonable
+        if (step % 100 == 0) {
+            outfile << t;
+            for (int i = 0; i < 8; ++i) {
+                outfile << " " << y0[4*i] << " " << y0[4*i+1];
+            }
+            outfile << endl;
+        }
+
+        y0 = rk4(t, y0, h, rhs_NBody);
+        t += h;
+        step++;
+        
+        // Progress indicator
+        if (step % 1000 == 0) {
+            cout << "Progress: t = " << t << " / " << tf << " seconds (" 
+                 << (t/tf)*100 << "%)" << endl;
+        }
+    }
+    outfile.close();
+    cout << "\nOrbit data written to trappist_orbits.dat" << endl;
+    cout << "Total steps: " << step << endl;
+
+    // 3. Final Report
+    cout << "\nPrinting system info (initial state):" << endl;
+    TRAPPIST_1.printInfo();
+    
+    // Print final positions from y0 to console
+    cout << "\n=== FINAL POSITIONS AFTER " << tf << " seconds ===" << endl;
+    cout << "Star: (0, 0) - at origin" << endl;
+    for (int i = 0; i < 7; i++) {
+        cout << "Planet " << p_names[i] << ": ("
+             << y0[4*(i+1)] << ", " << y0[4*(i+1)+1] << ") m" << endl;
+    }
+
+    return 0;
+}
